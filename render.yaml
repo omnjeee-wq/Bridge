@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: murph-stream-bridge
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MURPH_DATA_DIR
+        value: /data
+      - key: MURPH_JVM_ENABLED
+        value: "false"

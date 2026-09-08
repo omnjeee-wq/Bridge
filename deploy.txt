@@ -1,0 +1,297 @@
+MURPH STREAM BRIDGE — COMPLETE SELF-HOSTING GUIDE
+=================================================
+
+Developer: @SXNCH1T (Telegram)
+Project style: vibe coded, open self-hosted utility
+
+This guide explains how to deploy Murph Stream Bridge from GitHub, run it with
+Docker, deploy it on Render, connect it to Stremio, update it, and troubleshoot
+common problems.
+
+
+1. WHAT YOU NEED
+----------------
+
+Recommended production setup:
+
+- A GitHub repository containing this project
+- A Linux VPS, Docker host, or Render account
+- At least 2 GB RAM if the CloudStream JVM worker is enabled
+- A public HTTPS URL for remote Stremio clients
+- Docker Engine and Docker Compose-compatible commands
+
+For native Stremio manifests only, the application can run with much less
+memory. The JVM worker downloads and executes third-party .cs3 plugins, so use
+more memory and only trusted repositories.
+
+
+2. PUT THE PROJECT ON GITHUB
+----------------------------
+
+Create an empty repository on GitHub, then run these commands from the project
+directory:
+
+  git init
+  git add .
+  git commit -m "Initial Murph Stream Bridge release"
+  git branch -M main
+  git remote add origin https://github.com/YOUR_USERNAME/murph-stream-bridge.git
+  git push -u origin main
+
+Replace YOUR_USERNAME and the repository name with your own values.
+
+To deploy an existing GitHub copy onto a server:
+
+  git clone https://github.com/YOUR_USERNAME/murph-stream-bridge.git
+  cd murph-stream-bridge
+
+
+3. DEPLOY WITH DOCKER ON A VPS
+------------------------------
+
+Install Docker using the official instructions for your Linux distribution.
+Then run:
+
+  git clone https://github.com/YOUR_USERNAME/murph-stream-bridge.git
+  cd murph-stream-bridge
+  docker build -t murph-stream-bridge:latest .
+
+Run with native Stremio sources only:
+
+  docker volume create murph-data
+  docker run -d \
+    --name murph-stream-bridge \
+    --restart unless-stopped \
+    -p 10000:10000 \
+    -e MURPH_JVM_ENABLED=false \
+    -v murph-data:/data \
+    murph-stream-bridge:latest
+
+Run with the full CloudStream JVM runtime:
+
+  docker volume create murph-data
+  docker run -d \
+    --name murph-stream-bridge \
+    --restart unless-stopped \
+    -p 10000:10000 \
+    -e MURPH_JVM_ENABLED=true \
+    -e MURPH_CLOUDSTREAM_REPOSITORIES=https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json \
+    -v murph-data:/data \
+    murph-stream-bridge:latest
+
+The image builds the headless JVM worker from the configured upstream runtime.
+The first JVM startup downloads and converts plugins, so the first request can
+take longer than later requests. The /data volume keeps bridge state and the
+JVM cache between restarts.
+
+
+4. USE DOCKER WITH A CUSTOM PORT
+---------------------------------
+
+If port 10000 is already used:
+
+  docker run -d \
+    --name murph-stream-bridge \
+    --restart unless-stopped \
+    -p 8080:10000 \
+    -e MURPH_JVM_ENABLED=true \
+    -v murph-data:/data \
+    murph-stream-bridge:latest
+
+The application still listens on port 10000 inside the container. Open port
+8080 on the server firewall and use port 8080 in the browser and Stremio URL.
+
+
+5. DEPLOY FROM GITHUB TO RENDER
+--------------------------------
+
+1. Push the project to GitHub.
+2. Open Render and choose New > Blueprint.
+3. Select the GitHub repository.
+4. Confirm the Docker service from render.yaml.
+5. Deploy the service.
+6. Open the generated HTTPS URL.
+7. Add:
+
+     https://YOUR-RENDER-DOMAIN.onrender.com/api/manifest.json
+
+8. Open the Murph control panel and add or refresh trusted repositories.
+
+The included Render configuration defaults MURPH_JVM_ENABLED to false for the
+lowest-resource deployment. To use .cs3 plugins, set this environment variable
+to true in the Render service settings. A JVM-enabled deployment may need more
+memory and may have a slower cold start than a native-only deployment.
+
+Render free services can sleep and their local data can be ephemeral. Use a
+persistent disk where available, or periodically back up the JSON data
+directory. Never assume local files survive a rebuild unless your hosting plan
+documents persistent storage.
+
+
+6. DEPLOY WITHOUT DOCKER
+------------------------
+
+This is useful on a VPS with Node.js, Java, Git, and pnpm already installed.
+
+Install dependencies and build:
+
+  corepack enable
+  pnpm install --frozen-lockfile
+  pnpm --filter @workspace/api-spec run codegen
+  pnpm --filter @workspace/murph-stream-bridge run build
+  pnpm --filter @workspace/api-server run build
+
+Run the API with the built web panel:
+
+  export NODE_ENV=production
+  export PORT=10000
+  export MURPH_DATA_DIR=/var/lib/murph-stream-bridge
+  export MURPH_WEB_DIST=$PWD/artifacts/murph-stream-bridge/dist/public
+  node --enable-source-maps artifacts/api-server/dist/index.mjs
+
+For a separate JVM worker, use another process:
+
+  export PORT=8787
+  export MURPH_JVM_CACHE_DIR=/var/lib/murph-stream-bridge/jvm
+  ./scripts/run-jvm-worker.sh
+
+Then start the API with:
+
+  export MURPH_JVM_WORKER_URL=http://127.0.0.1:8787
+  node --enable-source-maps artifacts/api-server/dist/index.mjs
+
+Use systemd, Supervisor, or another process manager to keep both processes
+running after reboot. Do not run both processes on the same port.
+
+
+7. CONNECT STREMIO
+------------------
+
+After deployment, use this URL in Stremio:
+
+  https://YOUR-DOMAIN.example/api/manifest.json
+
+For a local server:
+
+  http://127.0.0.1:10000/api/manifest.json
+
+The local URL only works for a Stremio client on the same machine. For TVs,
+phones, or remote clients, use the server's LAN IP or public HTTPS domain.
+
+In Stremio:
+
+1. Open the addons page.
+2. Choose Add addon by URL.
+3. Paste the Murph manifest URL.
+4. Install the addon.
+5. Return to Murph and use Stream link check to test a known IMDb ID such as
+   tt0111161.
+
+
+8. PUT IT BEHIND HTTPS
+----------------------
+
+For a public VPS, put Murph behind a reverse proxy such as Caddy or Nginx and
+forward HTTPS traffic to 127.0.0.1:10000.
+
+Example Caddyfile:
+
+  bridge.example.com {
+      reverse_proxy 127.0.0.1:10000
+  }
+
+Point DNS for bridge.example.com at the server, then use:
+
+  https://bridge.example.com/api/manifest.json
+
+Restrict public access to the control panel with your own authentication,
+network policy, or reverse-proxy access control if the server is shared.
+
+
+9. UPDATE THE DEPLOYMENT
+------------------------
+
+From the project directory:
+
+  git pull origin main
+  docker build -t murph-stream-bridge:latest .
+  docker stop murph-stream-bridge
+  docker rm murph-stream-bridge
+  docker run -d \
+    --name murph-stream-bridge \
+    --restart unless-stopped \
+    -p 10000:10000 \
+    -e MURPH_JVM_ENABLED=true \
+    -v murph-data:/data \
+    murph-stream-bridge:latest
+
+The named volume is not removed, so JSON state and cached plugins remain.
+
+
+10. LOGS AND HEALTH CHECKS
+---------------------------
+
+Check the API health endpoint:
+
+  curl https://YOUR-DOMAIN.example/api/healthz
+
+Check the manifest:
+
+  curl https://YOUR-DOMAIN.example/api/manifest.json
+
+View Docker logs:
+
+  docker logs -f murph-stream-bridge
+
+Check the container:
+
+  docker ps
+
+If the JVM worker is enabled, its startup log is written inside the container
+at /tmp/murph-jvm-worker.log. Provider-specific DNS or decrypt warnings do not
+necessarily mean the worker failed; confirm that the log contains a successful
+Stremio server start message.
+
+
+11. COMMON FIXES
+----------------
+
+Blank page:
+
+- Check docker logs.
+- Confirm the API is listening on the published port.
+- Confirm the reverse proxy forwards to port 10000.
+- Run curl against /api/healthz.
+
+Stremio cannot install the addon:
+
+- Use /api/manifest.json, not the control-panel URL.
+- Confirm the URL is reachable from the same device running Stremio.
+- Use HTTPS for public deployments.
+
+No CloudStream streams:
+
+- Set MURPH_JVM_ENABLED=true.
+- Confirm the JVM worker has enough memory.
+- Check that the worker reports a successful Stremio server start.
+- Test an IMDb movie ID from the Murph Overview page.
+- Remember that individual upstream providers can be offline or block a
+  hosting provider even when the JVM worker itself is healthy.
+
+Settings disappeared:
+
+- Mount /data to a persistent volume.
+- Do not delete the murph-data Docker volume.
+- On Render, check whether the selected plan provides persistent storage.
+
+
+12. IMPORTANT TRUST AND LICENSE NOTE
+-------------------------------------
+
+The JVM worker downloads and executes third-party CloudStream plugins. Only use
+repositories you trust and review upstream licenses before redistribution.
+Keep private credentials out of repository URLs and source files.
+
+This project was vibe coded and refined for self-hosted use.
+
+Developer: @SXNCH1T (Telegram)

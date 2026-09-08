@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "name": "murph-stream-bridge",
+  "framework": "vite",
+  "buildCommand": "pnpm install && pnpm --filter @workspace/api-spec run codegen && pnpm --filter @workspace/murph-stream-bridge run build",
+  "devCommand": "pnpm --filter @workspace/murph-stream-bridge run dev",
+  "installCommand": "pnpm install",
+  "outputDirectory": "artifacts/murph-stream-bridge/dist/public",
+  "functions": {
+    "artifacts/api-server/dist/index.mjs": {
+      "maxDuration": 60,
+      "runtime": "nodejs22.x"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/artifacts/api-server/dist/index.mjs"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/artifacts/murph-stream-bridge/dist/public/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PATCH, DELETE, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+      ]
+    }
+  ],
+  "env": {
+    "MURPH_DATA_DIR": "/tmp/data",
+    "MURPH_API_PORT": "10000",
+    "NODE_ENV": "production"
+  },
+  "github": {
+    "enabled": true,
+    "autoAlias": true,
+    "silent": false
+  }
+}
