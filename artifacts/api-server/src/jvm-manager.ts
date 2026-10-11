@@ -1,6 +1,11 @@
-import { spawn, ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,14 +34,22 @@ interface JvmState {
   version: string | null;
 }
 
+const JVM_PORT = Number(process.env.MURPH_JVM_PORT || 8787);
+
 const DEFAULT_CONFIG: JvmConfig = {
   enabled: process.env.MURPH_JVM_ENABLED === "true",
-  sourceRepo: process.env.MURPH_JVM_SOURCE_REPO || "https://github.com/deepu2135/CNCVerse-Bridge.git",
+  sourceRepo:
+    process.env.MURPH_JVM_SOURCE_REPO ||
+    "https://github.com/deepu2135/CNCVerse-Bridge.git",
   sourceRef: process.env.MURPH_JVM_SOURCE_REF || "main",
-  sourceDir: process.env.MURPH_JVM_SOURCE_DIR || resolve(ROOT_DIR, ".cache", "cncverse-bridge"),
-  cacheDir: process.env.MURPH_JVM_CACHE_DIR || resolve(ROOT_DIR, "data", "jvm"),
-  port: Number(process.env.PORT || process.env.MURPH_JVM_PORT || 8787),
-  workerUrl: process.env.MURPH_JVM_WORKER_URL || `http://127.0.0.1:${process.env.PORT || 8787}`,
+  sourceDir:
+    process.env.MURPH_JVM_SOURCE_DIR ||
+    resolve(ROOT_DIR, ".cache", "cncverse-bridge"),
+  cacheDir: process.env.MURPH_JVM_CACHE_DIR || "/data/jvm",
+  port: JVM_PORT,
+  workerUrl:
+    process.env.MURPH_JVM_WORKER_URL ||
+    `http://127.0.0.1:${JVM_PORT}`,
   timeoutMs: Number(process.env.MURPH_JVM_TIMEOUT_MS || 30000),
   autoRestart: process.env.MURPH_JVM_AUTO_RESTART !== "false",
   maxRestarts: Number(process.env.MURPH_JVM_MAX_RESTARTS || 5),
@@ -51,27 +64,15 @@ class JvmManager {
   private process: ChildProcess | null = null;
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
   private startupTimeout: ReturnType<typeof setTimeout> | null = null;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private starting: Promise<boolean> | null = null;
 
   constructor(config: Partial<JvmConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.state = this.loadState();
-    this.ensureDirs();
-  }
-
-  private ensureDirs(): void {
     mkdirSync(this.config.cacheDir, { recursive: true });
     mkdirSync(dirname(this.config.sourceDir), { recursive: true });
-  }
 
-  private loadState(): JvmState {
-    try {
-      if (existsSync(STATE_FILE)) {
-        return JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-      }
-    } catch {
-      // ignore
-    }
-    return {
+    this.state = {
       pid: null,
       status: "stopped",
       lastError: null,
@@ -81,26 +82,107 @@ class JvmManager {
     };
   }
 
-  private saveState(): void {
+  private updateState(updates: Partial<JvmState>): void {
+    this.state = { ...this.state, ...updates };
+
     try {
       writeFileSync(STATE_FILE, JSON.stringify(this.state, null, 2));
     } catch {
-      // ignore
+      // State persistence is optional.
     }
   }
 
-  private updateState(updates: Partial<JvmState>): void {
-    this.state = { ...this.state, ...updates };
-    this.saveState();
+  private getWorkerBinary(): string {
+    const configured = process.env.MURPH_JVM_BINARY;
+
+    if (configured) return configured;
+
+    const prebuilt = "/app/jvm-worker/bin/headlessApp";
+
+    if (existsSync(prebuilt)) return prebuilt;
+
+    return resolve(
+      this.config.sourceDir,
+      "headlessApp",
+      "build",
+      "install",
+      "headlessApp",
+      "bin",
+      "headlessApp",
+    );
+  }
+
+  private async prepareWorker(): Promise<string> {
+    let binary = this.getWorkerBinary();
+
+    // Prefer the binary already built into the deployment image.
+    if (existsSync(binary)) {
+      console.log("[JVM] Using prebuilt worker:", binary);
+      return binary;
+    }
+
+    // Fallback for deployments that do not contain a prebuilt binary.
+    const { execSync } = await import("node:child_process");
+
+    if (!existsSync(resolve(this.config.sourceDir, "gradlew"))) {
+      console.log("[JVM] Cloning worker source...");
+
+      execSync(
+        `git clone --depth 1 --branch "${this.config.sourceRef}" "${this.config.sourceRepo}" "${this.config.sourceDir}"`,
+        { stdio: "inherit" },
+      );
+    }
+
+    const workerSource = resolve(ROOT_DIR, "scripts", "jvm-worker");
+    const workerDest = resolve(this.config.sourceDir, "headlessApp");
+
+    if (!existsSync(workerSource)) {
+      throw new Error(`Worker source not found: ${workerSource}`);
+    }
+
+    console.log("[JVM] Preparing worker module...");
+
+    execSync(`rm -rf "${workerDest}" && cp -R "${workerSource}" "${workerDest}"`, {
+      stdio: "inherit",
+    });
+
+    const settingsFile = resolve(this.config.sourceDir, "settings.gradle.kts");
+    const settings = readFileSync(settingsFile, "utf8");
+
+    if (!settings.includes('include(":headlessApp")')) {
+      writeFileSync(
+        settingsFile,
+        `${settings}\ninclude(":headlessApp")\n`,
+      );
+    }
+
+    console.log("[JVM] Building worker fallback...");
+
+    execSync("./gradlew :headlessApp:installDist --no-daemon", {
+      cwd: this.config.sourceDir,
+      stdio: "inherit",
+      env: { ...process.env, GRADLE_OPTS: "-Xmx2g" },
+    });
+
+    binary = this.getWorkerBinary();
+
+    if (!existsSync(binary)) {
+      throw new Error(`Worker binary not found: ${binary}`);
+    }
+
+    return binary;
   }
 
   async isHealthy(): Promise<boolean> {
-    if (!this.config.enabled || this.state.status !== "running") return false;
+    if (!this.config.enabled || this.state.status !== "running") {
+      return false;
+    }
 
     try {
       const response = await fetch(`${this.config.workerUrl}/health`, {
         signal: AbortSignal.timeout(5000),
       });
+
       return response.ok;
     } catch {
       return false;
@@ -108,150 +190,160 @@ class JvmManager {
   }
 
   async waitForHealthy(timeoutMs = 60000): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (await this.isHealthy()) return true;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    return false;
-  }
+    const deadline = Date.now() + timeoutMs;
 
-  private async downloadSource(): Promise<void> {
-    const { execSync } = await import("node:child_process");
-    if (!existsSync(resolve(this.config.sourceDir, "gradlew"))) {
-      console.log("[JVM] Cloning CNCVerse-Bridge source...");
-      execSync(`git clone --depth 1 --branch "${this.config.sourceRef}" "${this.config.sourceRepo}" "${this.config.sourceDir}"`, {
-        stdio: "inherit",
-      });
-    } else {
-      console.log("[JVM] Source already exists, pulling latest...");
-      try {
-        execSync(`git -C "${this.config.sourceDir}" fetch --depth 1 origin "${this.config.sourceRef}" && git -C "${this.config.sourceDir}" reset --hard FETCH_HEAD`, {
-          stdio: "inherit",
-        });
-      } catch {
-        console.warn("[JVM] Failed to update source, using cached version");
+    while (Date.now() < deadline) {
+      if (this.state.status === "error" || this.state.status === "stopped") {
+        return false;
       }
+
+      if (await this.isHealthy()) return true;
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-  }
 
-  private async setupWorker(): Promise<void> {
-    const { execSync } = await import("node:child_process");
-    const workerSource = resolve(ROOT_DIR, "scripts", "jvm-worker");
-    const workerDest = resolve(this.config.sourceDir, "headlessApp");
-
-    console.log("[JVM] Setting up headlessApp module...");
-    execSync(`rm -rf "${workerDest}" && cp -R "${workerSource}" "${workerDest}"`, { stdio: "inherit" });
-
-    const settingsFile = resolve(this.config.sourceDir, "settings.gradle.kts");
-    if (!readFileSync(settingsFile, "utf-8").includes('include(":headlessApp")')) {
-      writeFileSync(settingsFile, readFileSync(settingsFile, "utf-8") + '\ninclude(":headlessApp")\n');
-    }
-  }
-
-  private async buildWorker(): Promise<void> {
-    const { execSync } = await import("node:child_process");
-    console.log("[JVM] Building JVM worker (this may take a few minutes on first run)...");
-    execSync(`./gradlew :headlessApp:installDist --no-daemon`, {
-      cwd: this.config.sourceDir,
-      stdio: "inherit",
-      env: { ...process.env, GRADLE_OPTS: "-Xmx2g" },
-    });
-    console.log("[JVM] Build complete!");
-  }
-
-  private getWorkerBinary(): string {
-    return resolve(this.config.sourceDir, "headlessApp", "build", "install", "headlessApp", "bin", "headlessApp");
+    return false;
   }
 
   async start(): Promise<boolean> {
     if (!this.config.enabled) {
-      console.log("[JVM] JVM worker is disabled (set MURPH_JVM_ENABLED=true to enable)");
+      console.log("[JVM] Worker disabled");
       return false;
     }
 
-    if (this.state.status === "running" && this.process) {
-      console.log("[JVM] Worker already running");
+    if (this.process && this.state.status === "running") {
       return true;
     }
 
+    if (this.starting) return this.starting;
+
+    this.starting = this.startInternal();
+
+    try {
+      return await this.starting;
+    } finally {
+      this.starting = null;
+    }
+  }
+
+  private async startInternal(): Promise<boolean> {
     this.updateState({ status: "starting", lastError: null });
 
     try {
-      await this.downloadSource();
-      await this.setupWorker();
-      await this.buildWorker();
+      const binary = await this.prepareWorker();
 
-      const binary = this.getWorkerBinary();
-      if (!existsSync(binary)) {
-        throw new Error(`Worker binary not found at ${binary}`);
-      }
-
-      console.log("[JVM] Starting JVM worker on port", this.config.port);
-
-      const env = {
-        ...process.env,
-        PORT: String(this.config.port),
-        MURPH_JVM_CACHE_DIR: this.config.cacheDir,
-        MURPH_CLOUDSTREAM_REPOSITORIES: process.env.MURPH_CLOUDSTREAM_REPOSITORIES || "",
-      };
+      console.log("[JVM] Starting worker on port", this.config.port);
 
       this.process = spawn(binary, [], {
-        env,
-        detached: false,
+        env: {
+          ...process.env,
+          PORT: String(this.config.port),
+          MURPH_JVM_CACHE_DIR: this.config.cacheDir,
+          MURPH_CLOUDSTREAM_REPOSITORIES:
+            process.env.MURPH_CLOUDSTREAM_REPOSITORIES || "",
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      this.process.stdout?.on("data", (data) => {
-        const msg = data.toString().trim();
-        if (msg) console.log("[JVM]", msg);
-        if (msg.includes("listening on")) {
-          this.updateState({ status: "running", pid: this.process?.pid || null, lastStartTime: Date.now(), restarts: 0 });
-          this.startHealthCheck();
+      const child = this.process;
+
+      child.stdout?.on("data", (data) => {
+        const message = data.toString().trim();
+        if (message) console.log("[JVM]", message);
+      });
+
+      child.stderr?.on("data", (data) => {
+        const message = data.toString().trim();
+        if (message) console.error("[JVM ERROR]", message);
+      });
+
+      child.on("error", (error) => {
+        console.error("[JVM] Process error:", error.message);
+
+        if (this.process === child) {
+          this.process = null;
+          this.updateState({
+            status: "error",
+            pid: null,
+            lastError: error.message,
+          });
         }
       });
 
-      this.process.stderr?.on("data", (data) => {
-        const msg = data.toString().trim();
-        if (msg) console.error("[JVM ERROR]", msg);
-      });
+      child.on("exit", (code, signal) => {
+        console.log(`[JVM] Worker exited: code=${code}, signal=${signal}`);
 
-      this.process.on("exit", (code, signal) => {
-        console.log(`[JVM] Worker exited with code ${code}, signal ${signal}`);
+        if (this.process !== child) return;
+
         this.process = null;
         this.stopHealthCheck();
-        if (this.state.status !== "stopping") {
-          this.updateState({ status: "error", lastError: `Process exited: ${code ?? signal}` });
-          this.scheduleRestart();
-        } else {
+
+        if (this.state.status === "stopping") {
           this.updateState({ status: "stopped", pid: null });
+          return;
         }
+
+        this.updateState({
+          status: "error",
+          pid: null,
+          lastError: `Worker exited: ${code ?? signal ?? "unknown"}`,
+        });
+
+        this.scheduleRestart();
       });
 
-      this.startupTimeout = setTimeout(() => {
-        if (this.state.status === "starting") {
-          console.error("[JVM] Startup timeout");
-          this.process?.kill("SIGKILL");
-        }
-      }, 120000);
+      if (!child.pid) {
+        throw new Error("Worker process did not start");
+      }
 
-      return await this.waitForHealthy(120000);
+      this.updateState({
+        status: "running",
+        pid: child.pid,
+        lastStartTime: Date.now(),
+        lastError: null,
+      });
+
+      this.startHealthCheck();
+
+      const healthy = await this.waitForHealthy(this.config.timeoutMs);
+
+      if (!healthy) {
+        const error = "Worker did not pass its health check";
+        console.error("[JVM]", error);
+
+        if (this.process === child) {
+          this.updateState({ lastError: error });
+          child.kill("SIGTERM");
+        }
+
+        return false;
+      }
+
+      console.log("[JVM] Worker health check passed");
+      return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message =
+        error instanceof Error ? error.message : String(error);
+
       console.error("[JVM] Failed to start:", message);
+
       this.updateState({ status: "error", lastError: message });
       this.scheduleRestart();
+
       return false;
     }
   }
 
   private startHealthCheck(): void {
     this.stopHealthCheck();
+
     this.healthCheckInterval = setInterval(async () => {
       if (this.state.status !== "running") return;
-      const healthy = await this.isHealthy();
-      if (!healthy) {
-        console.warn("[JVM] Health check failed, scheduling restart");
+
+      if (!(await this.isHealthy())) {
+        console.warn("[JVM] Health check failed");
+
+        this.updateState({ lastError: "Worker health check failed" });
         this.process?.kill("SIGTERM");
       }
     }, 30000);
@@ -262,6 +354,7 @@ class JvmManager {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
     }
+
     if (this.startupTimeout) {
       clearTimeout(this.startupTimeout);
       this.startupTimeout = null;
@@ -269,43 +362,61 @@ class JvmManager {
   }
 
   private scheduleRestart(): void {
-    if (!this.config.autoRestart) return;
+    if (!this.config.autoRestart || this.restartTimer) return;
+
     if (this.state.restarts >= this.config.maxRestarts) {
-      console.error(`[JVM] Max restarts (${this.config.maxRestarts}) reached, giving up`);
-      this.updateState({ status: "error", lastError: "Max restarts reached" });
+      this.updateState({
+        status: "error",
+        lastError: "Maximum worker restarts reached",
+      });
       return;
     }
 
-    const delay = this.config.restartDelayMs * Math.pow(1.5, this.state.restarts);
-    console.log(`[JVM] Scheduling restart in ${delay}ms (attempt ${this.state.restarts + 1}/${this.config.maxRestarts})`);
+    const attempt = this.state.restarts + 1;
+    const delay =
+      this.config.restartDelayMs *
+      Math.pow(1.5, this.state.restarts);
 
-    setTimeout(() => {
-      if (this.state.status === "error") {
-        this.updateState({ restarts: this.state.restarts + 1 });
-        this.start();
-      }
+    console.log(`[JVM] Restart attempt ${attempt} in ${delay}ms`);
+
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+
+      if (this.state.status !== "error") return;
+
+      this.updateState({ restarts: attempt });
+      void this.start();
     }, delay);
   }
 
   async stop(): Promise<void> {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
     this.updateState({ status: "stopping" });
     this.stopHealthCheck();
 
-    if (this.process) {
-      this.process.kill("SIGTERM");
-      await new Promise((resolve) => {
+    const child = this.process;
+
+    if (child) {
+      await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
-          this.process?.kill("SIGKILL");
-          resolve(void 0);
+          child.kill("SIGKILL");
+          resolve();
         }, 10000);
-        this.process?.on("exit", () => {
+
+        child.once("exit", () => {
           clearTimeout(timeout);
-          resolve(void 0);
+          resolve();
         });
+
+        child.kill("SIGTERM");
       });
-      this.process = null;
     }
 
+    this.process = null;
     this.updateState({ status: "stopped", pid: null });
   }
 
@@ -333,25 +444,23 @@ export function getJvmManager(config?: Partial<JvmConfig>): JvmManager {
   if (!globalManager) {
     globalManager = new JvmManager(config);
   }
+
   return globalManager;
 }
 
-export async function startJvmWorker(config?: Partial<JvmConfig>): Promise<boolean> {
-  const manager = getJvmManager(config);
-  return manager.start();
+export async function startJvmWorker(
+  config?: Partial<JvmConfig>,
+): Promise<boolean> {
+  return getJvmManager(config).start();
 }
 
 export async function stopJvmWorker(): Promise<void> {
-  if (globalManager) {
-    await globalManager.stop();
-  }
+  if (globalManager) await globalManager.stop();
 }
 
 export async function restartJvmWorker(): Promise<boolean> {
-  if (globalManager) {
-    return globalManager.restart();
-  }
-  return false;
+  if (!globalManager) return false;
+  return globalManager.restart();
 }
 
 export function getJvmState(): JvmState | null {
@@ -368,4 +477,5 @@ export function getJvmWorkerUrl(): string {
 
 export function isJvmRuntimeConfigured(): boolean {
   return DEFAULT_CONFIG.enabled;
-}
+  }
+                            
