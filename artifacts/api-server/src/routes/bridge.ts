@@ -188,10 +188,13 @@ async function sourceRequests(pathname: string, req: { query: Record<string, unk
         source.search = "";
         source.hash = "";
         source.pathname = source.pathname.replace(/\/manifest\.json$/i, "").replace(/\/+$/, "");
-        const response = await fetch(`${source.toString()}${pathname}${suffix}`, {
-          signal: AbortSignal.timeout(10_000),
-          headers: { accept: "application/json" },
-        });
+        const baseUrl = source.toString().replace(/\/+$/, "");
+const cleanPath = pathname.startsWith("/") ? pathname : `/${pathname}`;
+
+const response = await fetch(`${baseUrl}${cleanPath}${suffix}`, {
+  signal: AbortSignal.timeout(10_000),
+  headers: { accept: "application/json" },
+});
         if (!response.ok) return null;
         return (await response.json()) as Record<string, unknown>;
       } catch {
