@@ -1,4 +1,4 @@
-FROM gradle:8.13-jdk19 AS jvm-build
+FROM gradle:8.13-jdk17 AS jvm-build
 
 ARG MURPH_JVM_SOURCE_REPO=https://github.com/deepu2135/CNCVerse-Bridge.git
 ARG MURPH_JVM_SOURCE_REF=main
