@@ -5,20 +5,14 @@ ARG MURPH_JVM_SOURCE_REF=main
 
 WORKDIR /opt
 
-RUN apt-get update && 
-apt-get install -y --no-install-recommends git && 
-rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "$MURPH_JVM_SOURCE_REF" 
-"$MURPH_JVM_SOURCE_REPO" cncverse-bridge
+RUN git clone --depth 1 --branch "$MURPH_JVM_SOURCE_REF" "$MURPH_JVM_SOURCE_REPO" cncverse-bridge
 
 COPY scripts/jvm-worker /opt/headlessApp
 
-RUN rm -rf /opt/cncverse-bridge/headlessApp 
-&& cp -R /opt/headlessApp /opt/cncverse-bridge/headlessApp 
-&& printf '\ninclude(":headlessApp")\n' >> /opt/cncverse-bridge/settings.gradle.kts 
-&& cd /opt/cncverse-bridge 
-&& ./gradlew :headlessApp:installDist --no-daemon
+RUN rm -rf /opt/cncverse-bridge/headlessApp && cp -R /opt/headlessApp /opt/cncverse-bridge/headlessApp && printf '\ninclude(":headlessApp")\n' >> /opt/cncverse-bridge/settings.gradle.kts && cd /opt/cncverse-bridge && ./gradlew :headlessApp:installDist --no-daemon
+
 
 FROM node:22-bookworm-slim AS build
 
@@ -29,21 +23,16 @@ RUN corepack enable
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
 
 COPY artifacts ./artifacts
+
 COPY lib ./lib
+
 COPY scripts ./scripts
 
 RUN pnpm install --frozen-lockfile
 
-Generate API files without running the combined codegen/typecheck script.
-
 RUN pnpm --filter @workspace/api-spec exec orval --config ./orval.config.ts
 
-Zod v3 compatibility patch for generated integer schemas.
-
-RUN sed -i 's/zod.int()/zod.number().int()/g' lib/api-zod/src/generated/api.ts 
-&& ! grep -n 'zod.int()' lib/api-zod/src/generated/api.ts
-
-Run the library type-check only after applying the compatibility patch.
+RUN sed -i 's/zod\.int()/zod.number().int()/g' lib/api-zod/src/generated/api.ts && ! grep -n 'zod\.int()' lib/api-zod/src/generated/api.ts
 
 RUN pnpm -w run typecheck:libs
 
@@ -51,17 +40,18 @@ RUN pnpm --filter @workspace/murph-stream-bridge run build
 
 RUN pnpm --filter @workspace/api-server run build
 
+
 FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
 ENV NODE_ENV=production
+
 ENV MURPH_WEB_DIST=/app/artifacts/murph-stream-bridge/dist/public
+
 ENV MURPH_DATA_DIR=/data
 
-RUN apt-get update 
-&& apt-get install -y --no-install-recommends openjdk-17-jre-headless 
-&& rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable
 
