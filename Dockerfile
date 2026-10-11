@@ -38,6 +38,8 @@ RUN pnpm -w run typecheck:libs
 
 RUN pnpm --filter @workspace/murph-stream-bridge run build
 
+RUN find /app/artifacts/murph-stream-bridge -maxdepth 4 -type d -print
+
 RUN pnpm --filter @workspace/api-server run build
 
 
