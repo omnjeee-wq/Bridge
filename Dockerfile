@@ -24,6 +24,7 @@ COPY lib ./lib
 COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @workspace/api-spec run codegen
+RUN sed -i 's/z\.int()/z.number().int()/g' lib/api-zod/src/generated/api.ts
 RUN pnpm --filter @workspace/murph-stream-bridge run build
 RUN pnpm --filter @workspace/api-server run build
 
