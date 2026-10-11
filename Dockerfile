@@ -1,6 +1,6 @@
 FROM gradle:8.13-jdk21 AS jvm-build
 
-ARG MURPH_JVM_SOURCE_REPO=https://github.com/deepu2135/CNCVerse-Bridge.git
+ARG MURPH_JVM_SOURCE_REPO=https://github.com/NivinCNC/CNCVerse-Bridge.git
 ARG MURPH_JVM_SOURCE_REF=main
 
 WORKDIR /opt
